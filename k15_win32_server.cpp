@@ -162,10 +162,13 @@ void setup()
 	WSADATA wsaData;
 	WSAStartup(wsaVersion, &wsaData);
 
+	const int maxClients = 16u;
+	const size_t serverBufferSizeInBytes = calculateHttpServerMemorySizeInBytes(maxClients);
+
 	http_server_parameters parameters;
 	parameters.port = 80;
-	parameters.memoryBufferSizeInBytes = 1024 * 1024;
-	parameters.pMemoryBuffer = (char*)malloc(1024*1024);
+	parameters.maxClients = maxClients;
+	parameters.pMemoryBuffer = malloc(serverBufferSizeInBytes);
 	parameters.pIpv4BindAddress = "0.0.0.0";
 	parameters.pIpv6BindAddress = "::0";
 	parameters.onlyServeBelowRoot = true;
