@@ -651,6 +651,169 @@ bool isStringEqualNonTerminated( const char* pStringA, const char* pStringB )
     return true;
 }
 
+struct sha1
+{
+    unsigned int h0;
+    unsigned int h1;
+    unsigned int h2;
+    unsigned int h3;
+    unsigned int h4;
+
+    unsigned long long ml;
+    unsigned char block[64];
+    unsigned char blockSize;
+};
+
+struct sha1Digest
+{
+    char data[20];
+};
+
+void initSha1Hash( sha1* pHash )
+{
+    pHash->h0 = 0x67452301;
+    pHash->h1 = 0xefcdab89;
+    pHash->h2 = 0x98badcfe;
+    pHash->h3 = 0x10325476;
+    pHash->h4 = 0xc3d2e1f0;
+
+    pHash->ml = 0u;
+    pHash->blockSize = 0u;
+}
+
+unsigned int sha1LeftRotate(unsigned int value, unsigned int bits)
+{
+    return ((value) << bits) | (value >> (32 - bits));
+}
+
+unsigned int changeEndianessUint32(unsigned int v)
+{
+    union endianessData
+    {
+        unsigned int v;
+        unsigned char b[4];
+    };
+
+    endianessData data;
+    data.v = v;
+    return (unsigned int)data.b[0] >> 24u | (unsigned int)data.b[1] >> 16u | (unsigned int)data.b[2] >> 8u | (unsigned int)data.b[3] >> 0u;
+}
+
+unsigned long long changeEndianessUint64(unsigned long long v)
+{
+    union endianessData
+    {
+        unsigned long long v;
+        unsigned char b[8];
+    };
+
+    endianessData data;
+    data.v = v;
+    return (unsigned long long)data.b[0] >> 56u | (unsigned long long)data.b[1] >> 48u | (unsigned long long)data.b[2] >> 40u | (unsigned long long)data.b[3] >> 32u |
+           (unsigned long long)data.b[4] >> 24u | (unsigned long long)data.b[5] >> 16u | (unsigned long long)data.b[6] >>  8u | (unsigned long long)data.b[7] >>  0u;  
+}
+
+void hashSha1Block( sha1* pHash )
+{
+    unsigned int w[80];
+
+    for( size_t i = 0u; i < 16u; ++i )
+    {
+        w[i] = changeEndianessUint32(w[i]);
+    }
+
+    for( size_t i = 16u; i < 80u; ++i )
+    {
+        w[i] = sha1LeftRotate(w[i-3] ^ w[i-8] ^ w[i-14] ^ w[i-16], 1);
+    }
+
+    unsigned int a = pHash->h0;
+    unsigned int b = pHash->h1;
+    unsigned int c = pHash->h2;
+    unsigned int d = pHash->h3;
+    unsigned int e = pHash->h4;
+
+    unsigned int f = 0u;
+    unsigned int k = 0u;
+    for( size_t i = 0u; i < 80; ++i )
+    {
+        if( i <= 19 )
+        {
+            f = (b & c) | ((!b) & d);
+            k = 0x5A827999;
+        }
+        else if( i >= 20 && i <= 39 )
+        {
+            f = b ^ c ^ d;
+            k = 0x6ED9EBA1;
+        }
+        else if( i >= 40 && i <= 59 )
+        {
+            f = (b & c) | (b & d) | (c & d);
+            k = 0x8F1BBCDC;
+        }
+        else if( i >= 60 && i <= 79 )
+        {
+            f = b ^ c ^ d;
+            k = 0xCA65C1D6;
+        }
+
+        const unsigned int temp = sha1LeftRotate(a, 5) + f + e + k + w[i];
+        e = d;
+        d = c;
+        c = sha1LeftRotate(b, 30);
+        b = a;
+        a = temp;
+    }
+
+    pHash->h0 = pHash->h0 + a;
+    pHash->h1 = pHash->h1 + b;
+    pHash->h2 = pHash->h2 + c;
+    pHash->h3 = pHash->h3 + d;
+    pHash->h4 = pHash->h4 + e;
+}
+
+void addSha1Hash( sha1* pHash, const void* pData, size_t dataSizeInBytes )
+{
+    if( pHash->blockSize + dataSizeInBytes > sizeof( pHash->block ) )
+    {
+        const size_t dataSizeToCopy = dataSizeInBytes - sizeof( pHash->block );
+        memcpy( pHash->block + pHash->blockSize, pData, dataSizeToCopy );
+        hashSha1Block( pHash );
+        dataSizeInBytes -= dataSizeToCopy;
+    }
+}
+
+sha1Digest finishSha1Hash( sha1* pHash )
+{
+    const unsigned char firstBit = 0x80;
+    addSha1Hash(pHash, &firstBit, 1u);
+    
+    while( pHash->blockSize != 56u )
+    {
+        const unsigned char zero = 0x0u;
+        addSha1Hash(pHash, &zero, 1u);
+    }
+
+    const unsigned long long messageLength = changeEndianessUint64(pHash->ml);
+    addSha1Hash(pHash,&messageLength,8u);
+
+    assert(pHash->blockSize == 0u);
+    
+    unsigned int digestData[5];
+
+    digestData[0] = sha1LeftRotate(pHash->h0, 128);
+    digestData[1] = sha1LeftRotate(pHash->h1, 96);
+    digestData[2] = sha1LeftRotate(pHash->h2, 64);
+    digestData[3] = sha1LeftRotate(pHash->h3, 32);
+    digestData[4] = pHash->h4;
+
+    sha1Digest digest;
+    memcpy(&digest, digestData, sizeof(digestData));
+
+    return digest;
+}
+
 bool serveHttpClients(http_server* pServer)
 {
     while (true)
@@ -695,6 +858,11 @@ bool serveHttpClients(http_server* pServer)
                     closeClientConnection(pClient);
                     continue;
                 }
+
+                sha1 websocketHash;
+                initSha1Hash( &websocketHash );
+                addSha1Hash( &websocketHash, pWebsocketKey );
+                addSha1Hash( &websocketHash, "" );
 
                 pClient->flags |= http_client_flag_websocket;
             }
