@@ -1,6 +1,11 @@
 #ifndef K15_HTTP_SERVER_INCLUDE
 #define K15_HTTP_SERVER_INCLUDE
 
+#ifdef _WIN32
+#include <winsock2.h>
+#include <Ws2tcpip.h>
+#endif
+
 #ifndef AF_INET6
 #   define AF_INET6        23              // Internetwork Version 6
 #endif
@@ -47,7 +52,8 @@ enum
 
 enum http_server_flag : unsigned char
 {
-    http_server_flag_only_serve_below_root = (1 << 0u)
+    http_server_flag_only_serve_below_root  = (1 << 0u),
+    http_server_flag_manage_platform        = (1 << 1u)
 };
 
 struct http_server_memory
@@ -106,9 +112,130 @@ struct http_server_parameters
     int             maxClients;
     bool            onlyServeBelowRoot; //FK: Don't allow paths like ../file.txt
     bool            allowIPV6;
+    bool            handlePlatformBackend;
 };
 
+#ifdef _WIN32
+bool initPlatformBackend(const http_server_parameters& parameters)
+{
+    if( !parameters.handlePlatformBackend )
+    {
+        return true;
+    }
+
+    const WORD wsaVersion = MAKEWORD(3, 0);
+    WSADATA wsaData;
+    const int wsaStartupResult = WSAStartup( wsaVersion, &wsaData );
+    if( wsaStartupResult == 0 )
+    {
+        return true;
+    }
+
+    const int wsaError = WSAGetLastError();
+    (void)wsaError;
+
+    return false;
+}
+
+void shutdownPlatformBackend(http_server* pServer)
+{
+    if( ( pServer->flags & http_server_flag_manage_platform ) > 0)
+    {
+        const int wsaError = WSACleanup();
+        (void)wsaError;
+    }
+}
+#else
+bool initPlatformBackend(const http_server_parameters& parameters)
+{
+    (void)parameters;
+    return true;
+}
+
+void shutdownPlatformBackend(http_server* pServer)
+{
+    (void)pServer;
+}
+#endif
+
 static const char* pWebSocketMagicString = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+
+bool isLittleEndianPlatform()
+{
+    union endiannes
+    {
+        unsigned short word;
+        unsigned char bytes[2];
+    };
+
+    endiannes endiannesTest;
+    endiannesTest.word = 0x1234;
+
+    if( endiannesTest.bytes[0] == 0x12 )
+    {
+        return false;
+    }
+
+    return true;
+}
+
+template <typename T>
+T convertToLittleEndian(T value)
+{
+    if( !isLittleEndianPlatform() )
+    {
+        return value;
+    }
+
+    unsigned char* pSwapBuffer = reinterpret_cast<unsigned char*>(&value);
+
+    for( size_t byteIndex = 0u; byteIndex < sizeof(T) / 2; ++byteIndex )
+    {
+        const size_t swapIndex = sizeof(T) - byteIndex - 1;
+        const unsigned char temp = pSwapBuffer[byteIndex];
+        pSwapBuffer[byteIndex] = pSwapBuffer[swapIndex];
+        pSwapBuffer[swapIndex] = temp; 
+    }
+
+    return value;
+}
+
+uint64_t byteCountToBitCount( size_t byteCount )
+{
+    return (uint64_t)(byteCount * 8);
+}
+
+bool calculateSha1Hash( uint8_t* pOutputHash, uint8_t* pInputData, size_t dataLengthInBytes )
+{
+    uint32_t h0 = convertToLittleEndian(0x67452301);
+    uint32_t h1 = convertToLittleEndian(0xEFCDAB89);
+    uint32_t h2 = convertToLittleEndian(0x98BADCFE);
+    uint32_t h3 = convertToLittleEndian(0x10325476);
+    uint32_t h4 = convertToLittleEndian(0xC3D2E1F0);
+
+    uint64_t ml = byteCountToBitCount( dataLengthInBytes );
+    uint8_t chunk[64]; //FK: 512 bit
+
+    while( true )
+    {
+        const size_t bytesToCopy = min( dataLengthInBytes, 64 );
+        if( bytesToCopy == 0u )
+        {
+            break;
+        }
+        
+        memcpy(chunk, pInputData, bytesToCopy);
+        pInputData += bytesToCopy;
+
+        if( dataLenghtInBytes < 56 )
+        {
+            chunk[bytesToCopy] = 0x80;
+            memset(&chunk[bytesToCopy+1],0,56-(bytesToCopy+1));
+            memcpy(chunk[56],&ml,sizeof(ml));
+        }
+    }
+    return false;
+}
 
 bool listenOnSocket(const socketId& socket, int protocol, int port, const char* pBindAddress)
 {
@@ -314,6 +441,7 @@ http_error_id readClientRequest(http_request* pOutRequest, http_client* pClient 
 
 void destroyHttpServer(http_server* pServer)
 {
+    shutdownPlatformBackend( pServer );
     if (pServer->ipv4Socket != INVALID_SOCKET)
     {
         closesocket(pServer->ipv4Socket);
@@ -368,6 +496,11 @@ size_t calculateHttpServerMemorySizeInBytes( int maxClients )
 
 http_server* createHttpServer(const http_server_parameters& parameters)
 {
+    if( !initPlatformBackend( parameters ) )
+    {
+        return nullptr;
+    }
+
     if( parameters.maxClients == 0u )
     {
         return nullptr;
@@ -396,9 +529,18 @@ http_server* createHttpServer(const http_server_parameters& parameters)
         pServer->rootDirectoryLength = pathLength;
     }
 
-    pServer->ipv4Socket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    pServer->ipv6Socket = parameters.allowIPV6 ? socket(AF_INET6, SOCK_STREAM, IPPROTO_TCP) : INVALID_SOCKET;
-    pServer->port       = parameters.port;
+    pServer->flags              = 0u;
+    pServer->activeClientCount  = 0u;
+    pServer->maxClients         = parameters.maxClients;
+    pServer->pClients           = (http_client*)pServerMemory;
+    pServer->ipv4Socket         = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    pServer->ipv6Socket         = parameters.allowIPV6 ? socket(AF_INET6, SOCK_STREAM, IPPROTO_TCP) : INVALID_SOCKET;
+    pServer->port               = parameters.port;
+
+    if( parameters.handlePlatformBackend )
+    {
+        pServer->flags |= http_server_flag_manage_platform;
+    }
 
     if( pServer->ipv4Socket == INVALID_SOCKET && pServer->ipv6Socket == INVALID_SOCKET )
     {
@@ -423,10 +565,6 @@ http_server* createHttpServer(const http_server_parameters& parameters)
         }
     }
     
-    pServer->flags = 0u;
-    pServer->activeClientCount  = 0u;
-    pServer->maxClients         = parameters.maxClients;
-    pServer->pClients           = (http_client*)pServerMemory;
     pServerMemory += sizeof(http_client) * parameters.maxClients;
 
     for( int clientIndex = 0u; clientIndex < parameters.maxClients; ++clientIndex )

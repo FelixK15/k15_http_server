@@ -1,7 +1,5 @@
 #define _CRT_SECURE_NO_WARNINGS
 
-#include <winsock2.h>
-#include <Ws2tcpip.h>
 #include <stdio.h>
 
 #include "k15_http_server.hpp"
@@ -158,10 +156,6 @@ void setup()
 {
 	allocateDebugConsole();
 
-	WORD wsaVersion = MAKEWORD(3,2);
-	WSADATA wsaData;
-	WSAStartup(wsaVersion, &wsaData);
-
 	const int maxClients = 16u;
 	const size_t serverBufferSizeInBytes = calculateHttpServerMemorySizeInBytes(maxClients);
 
@@ -172,6 +166,7 @@ void setup()
 	parameters.pIpv4BindAddress = "0.0.0.0";
 	parameters.pIpv6BindAddress = "::0";
 	parameters.onlyServeBelowRoot = true;
+	parameters.handlePlatformBackend = true;
 	parameters.pRootDirectory = "html";
 
 	http_server* pServer = createHttpServer(parameters);
